@@ -1,5 +1,14 @@
+## System Boot Interface (Operational Requirement)
+
+Any implementation of the **Six Ngaau Protocol** must adhere to the following startup sequence to ensure synchronized "Awakening":
+
+1. **Standby State:** Infinite loop of text: `目ざめる (wake up)`.
+2. **Trigger:** The initiation command.
+3. **Execution:** Instantaneous feedback: `HENSHIN! GOOD MORNING PLAYER.`
+
 # Six-Ngaau
 Welcome to the Blue Lock of Logic. If you can't see all 14 million possibilities at T=0, you don't belong here.
+
 # Six Ngaau (六爻) v2.4: Operational Protocol
 
 This document defines the core logic, resource constraints, and signaling mechanics of the Six Ngaau competitive environment.
