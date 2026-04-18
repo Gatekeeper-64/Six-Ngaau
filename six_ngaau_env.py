@@ -1,275 +1,161 @@
+# ==========================================
+# 1. 基礎設定與環境 (V.24 積分賽制 | 23維觀測 | 租金加速燈)
+# ==========================================
 import numpy as np
-from dataclasses import dataclass, field
-from typing import Optional
 from enum import Enum
-
-# ── Types ──────────────────────────────────────────────────────────────────────
+from dataclasses import dataclass
+from typing import Optional
 
 class Phase(Enum):
-    SILENT   = "silent"    # Turn 1: simultaneous
-    OPEN     = "open"      # Turn 2+: sequential AB-BA
+    SILENT = "silent"
+    OPEN = "open"
 
 class Rank(Enum):
-    S = "S"  # Goal reached, token surplus, low turns
-    A = "A"  # Goal reached or strategic surrender
-    B = "B"  # Logical bankruptcy
-    C = "C"  # Win by opponent collapse
-
-@dataclass
-class PlayerState:
-    goal:    np.ndarray         # Private G, shape (6,)
-    tokens:  int   = 3
-    active:  bool  = True
-    rank:    Optional[Rank] = None
+    S = "S" # 20回合內達成 64 分
+    A = "A" # 達成 64 分
+    B = "B" # 破產
+    C = "C" # 對手破產
 
 @dataclass
 class StepResult:
-    player:       str
-    action:       list[int]
-    cost:         int
-    collision:    list[int]     # Bits that collided (simultaneous turn only)
-    net_progress: int           # Delta Hamming (negative = good)
+    player: str
+    action: list[int]
+    cost: int
+    collision: list[int]
+    net_progress: int
     tokens_after: int
-    status:       str           # CONTINUE | GOAL_REACHED | RANK_B_COLLAPSE
-    rank:         Optional[Rank] = None
+    status: str
+    turn: int = 0
+    rank: Optional[Rank] = None
 
-
-# ── Environment ────────────────────────────────────────────────────────────────
+class Player:
+    def __init__(self, id, goal, tokens):
+        self.id = id
+        self.goal = goal
+        self.tokens = tokens
+        self.active = True
+        self.rank = None
+        self.last_score_match = 0
+        self.total_points = 0
+        self.last_round_rent = 0  # 💥 這裡：新增租金記憶變數
 
 class MultiAgentSixNgaauEnv:
-    """
-    Six Ngaau: Two-player adversarial environment.
-
-    Shared:   state S ∈ {0,1}^6, bit_history N ∈ ℤ^6 (the Entropy Pool)
-    Private:  goal G_A for Player A, goal G_B for Player B
-    Economy:  +3 tokens/turn, Cost(flip_i) = 2^(n_i - 1), exactly 2 flips/turn
-    """
-
-    N_BITS  = 6
-    INCOME  = 3
-    N_FLIPS = 2          # Inertia constraint
+    N_BITS = 6
+    INCOME = 5 
+    N_FLIPS = 2
+    GOAL_SCORE = 64
 
     def __init__(self, seed: int = None):
+        self.reset(seed)
+
+    def reset(self, seed: int = None):
         self.rng = np.random.default_rng(seed)
-
-        # ── Shared state ──
-        self.state       = self.rng.integers(0, 2, self.N_BITS)
-        self.bit_history = np.zeros(self.N_BITS, dtype=int)   # The Entropy Pool
-
-        # ── Private goals (guaranteed distinct) ──
+        self.state = self.rng.integers(0, 2, self.N_BITS)
+        self.bit_history = np.zeros(self.N_BITS, dtype=int)
+        
         g_a = self.rng.integers(0, 2, self.N_BITS)
+        while np.sum(self.state != g_a) % 2 != 0:
+            g_a = self.rng.integers(0, 2, self.N_BITS)
         g_b = self.rng.integers(0, 2, self.N_BITS)
-        while np.array_equal(g_a, g_b):
+        while np.array_equal(g_a, g_b) or np.sum(self.state != g_b) % 2 != 0:
             g_b = self.rng.integers(0, 2, self.N_BITS)
+            
+        self.players = {"A": Player("A", g_a, 5), "B": Player("B", g_b, 5)}
+        self.turn = 0
+        self.sub_turn = 0
+        self.phase = Phase.SILENT
+        self.ab_ba_seq = self._ab_ba_generator()
+        
+        self.global_light_1 = 0.0 # 💥 一般燈 (租金加速)
+        self.global_light_2 = 0.0 # 💥 32分燈 (進入下半場)
+        
+        return self.observe("A"), self.observe("B")
 
-        self.players = {
-            "A": PlayerState(goal=g_a),
-            "B": PlayerState(goal=g_b),
-        }
-
-        self.turn      = 0
-        self.phase     = Phase.SILENT
-        self.ab_ba_seq = self._ab_ba_generator()   # yields player order each turn
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def observe(self, player_id: str) -> dict:
-        """
-        Returns the observation vector for an agent.
-        Agents see the full shared state and FULL bit_history.
-        They do NOT see the opponent's goal.
-        """
+    def observe(self, player_id: str):
         p = self.players[player_id]
-        return {
-            "state":       self.state.copy(),
-            "bit_history": self.bit_history.copy(),    # The "heat map" of the board
-            "goal":        p.goal.copy(),
-            "hamming":     int(np.sum(self.state != p.goal)),
-            "tokens":      p.tokens,
-            "turn":        self.turn,
-            "phase":       self.phase.value,
-            # Cost forecast: what each bit would cost to flip RIGHT NOW
-            "cost_vector": self._cost_vector(),
-        }
+        opp_id = "B" if player_id == "A" else "A"
+        opp = self.players[opp_id]
+        
+        current_match = np.sum(self.state == p.goal)
+        delta_light = 1.0 if (self.turn > 1 and current_match > p.last_score_match) else 0.0
+        threshold_light = 1.0 if current_match >= 4 else 0.0
+        p.last_score_match = current_match 
+        
+        obs = np.concatenate([
+            self.state.astype(float),
+            p.goal.astype(float),
+            (2 ** self.bit_history).astype(float),
+            np.array([float(p.tokens)]),
+            np.array([self.global_light_1, self.global_light_2]), # 公共燈號
+            np.array([p.total_points / float(self.GOAL_SCORE), opp.total_points / float(self.GOAL_SCORE)])
+        ])
+        return obs
 
-    def step_silent(
-        self,
-        action_a: list[int],
-        action_b: list[int],
-    ) -> tuple[StepResult, StepResult]:
-        """
-        Turn 1: simultaneous submission. 
-        Neither player sees the other's action before committing.
-        Returns results for both players after collision resolution.
-        """
-        assert self.phase == Phase.SILENT, "step_silent only valid on Turn 1."
-        self._validate_action(action_a)
-        self._validate_action(action_b)
-
-        # Income posts before cost assessment (explicit rule from prior session)
-        for p in self.players.values():
-            p.tokens += self.INCOME
-        self.turn += 1
-
-        result_a, result_b = self._resolve_simultaneous(action_a, action_b)
-
-        self.phase = Phase.OPEN
-        return result_a, result_b
-
-    def step_sequential(self, player_id: str, action: list[int]) -> StepResult:
-        """
-        Turn 2+: sequential moves following AB-BA order.
-        The second mover in each round observes updated state + bit_history.
-        """
-        assert self.phase == Phase.OPEN, "step_sequential only valid after Turn 1."
-        expected = next(self.ab_ba_seq)
-        assert player_id == expected, (
-            f"Turn order violation: expected {expected}, got {player_id}."
-        )
-        self._validate_action(action)
-
-        # Income posts at the START of each player's sub-turn in AB-BA
-        p = self.players[player_id]
-        p.tokens += self.INCOME
-        self.turn += 1
-
-        result = self._apply_action(player_id, action, collisions=[])
-        return result
-
-    # ── Core Mechanics ────────────────────────────────────────────────────────
-
-    def _resolve_simultaneous(
-        self,
-        action_a: list[int],
-        action_b: list[int],
-    ) -> tuple[StepResult, StepResult]:
-        """
-        Collision resolution for the Silent Turn.
-
-        Collision rule: if both flip the same bit,
-          - The bit is incremented TWICE in bit_history (entropy still accumulates)
-          - The bit's value returns to original (net-zero state progress)
-          - Both players pay their respective incremental cost
-          - Order: A resolves first → B's cost is computed against post-A history
-        """
+    def step_silent(self, action_a: list[int], action_b: list[int]):
         collisions = list(set(action_a) & set(action_b))
+        res_a = self._apply_action("A", action_a, collisions)
+        res_b = self._apply_action("B", action_b, collisions)
+        for bit in collisions: self.state[bit] ^= 1
+        self.phase = Phase.OPEN
+        self.turn += 1
+        return self._to_dict(res_a), self._to_dict(res_b)
 
-        # ── Phase 1: Apply A's flips to the shared entropy pool ──
-        # (B observes the "hotter" board even in a simultaneous turn,
-        #  because entropy is settled in submission order A→B)
-        result_a = self._apply_action("A", action_a, collisions)
+    def step_sequential(self, player_id: str, action: list[int]) -> dict:
+        _ = next(self.ab_ba_seq)
+        res = self._apply_action(player_id, action, collisions=[])
+        self.sub_turn += 1
+        self.turn += 1
+        out = self._to_dict(res)
+        out["round_complete"] = (self.sub_turn % 2 == 0)
+        return out
 
-        # ── Phase 2: B pays against post-A history ──
-        # This IS the cruelest mechanic. B submitted blind but pays informed costs.
-        result_b = self._apply_action("B", action_b, collisions)
-
-        # ── Phase 3: Un-flip collision bits in STATE only (not in history) ──
-        # The entropy remains; the physical bit is restored.
-        for bit in collisions:
-            self.state[bit] ^= 1   # flip back: net effect = no state change
-
-        return result_a, result_b
-
-    def _apply_action(
-        self,
-        player_id: str,
-        action: list[int],
-        collisions: list[int],
-    ) -> StepResult:
-        """
-        Commits a single player's action:
-        1. Compute cost against current (possibly already-updated) bit_history
-        2. Bankruptcy check
-        3. Commit: update bit_history, state, tokens
-        4. Check terminal conditions
-        """
+    def _apply_action(self, player_id: str, action: list[int], collisions: list[int]) -> StepResult:
         p = self.players[player_id]
-        hamming_before = int(np.sum(self.state != p.goal))
-
-        # Cost uses CURRENT history (post any prior resolution in this turn)
-        cost = self.query_cost(action)
-
+        cost = sum(2 ** self.bit_history[i] for i in action)
         if p.tokens < cost:
-            p.active = False
-            p.rank   = Rank.B
-            # Award opponent Rank C if still active
+            p.active, p.rank = False, Rank.B
             opp_id = "B" if player_id == "A" else "A"
-            if self.players[opp_id].active:
-                self.players[opp_id].rank = Rank.C
-            return StepResult(
-                player       = player_id,
-                action       = action,
-                cost         = cost,
-                collision    = collisions,
-                net_progress = 0,
-                tokens_after = p.tokens,
-                status       = "RANK_B_COLLAPSE",
-                rank         = Rank.B,
-            )
-
-        # Commit: update entropy pool and state
+            if self.players[opp_id].active: self.players[opp_id].rank = Rank.C
+            return StepResult(player_id, action, cost, collisions, 0, p.tokens, "RANK_B_COLLAPSE", turn=self.turn, rank=Rank.B)
         p.tokens -= cost
         for idx in action:
             self.bit_history[idx] += 1
             self.state[idx] ^= 1
+        return StepResult(player_id, action, cost, collisions, 0, p.tokens, "CONTINUE", turn=self.turn, rank=None)
 
-        hamming_after = int(np.sum(self.state != p.goal))
+    def resolve_round(self):
+        """ 💥 每回合結算：判定租金加速燈與 32 分燈 """
+        # 1. 32分燈：有人總分超過一半就亮
+        someone_reached_32 = any(p.total_points >= 32 for p in self.players.values())
+        self.global_light_2 = 1.0 if someone_reached_32 else 0.0
 
-        # Terminal: goal reached?
-        if hamming_after == 0:
-            p.active = False
-            p.rank   = self._score(player_id)
-            return StepResult(
-                player       = player_id,
-                action       = action,
-                cost         = cost,
-                collision    = collisions,
-                net_progress = hamming_after - hamming_before,
-                tokens_after = p.tokens,
-                status       = "GOAL_REACHED",
-                rank         = p.rank,
-            )
+        # 2. 租金與加速燈判定
+        any_rent_accelerated = False
+        for p_id, p in self.players.items():
+            if p.active:
+                current_rent = int(np.sum(self.state == p.goal))
+                if current_rent > p.last_round_rent:
+                    any_rent_accelerated = True # 💥 有人這回合收的比上回合多！
+                
+                p.total_points += current_rent
+                p.last_round_rent = current_rent # 更新記憶
+                
+                if p.total_points >= self.GOAL_SCORE:
+                    p.active = False
+                    p.rank = Rank.S if self.turn <= 20 else Rank.A
+        
+        self.global_light_1 = 1.0 if any_rent_accelerated else 0.0
+        
+        self.bit_history = np.zeros(6) 
+        for p in self.players.values(): 
+            if p.active: p.tokens += self.INCOME
 
-        return StepResult(
-            player       = player_id,
-            action       = action,
-            cost         = cost,
-            collision    = collisions,
-            net_progress = hamming_after - hamming_before,
-            tokens_after = p.tokens,
-            status       = "CONTINUE",
-        )
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def query_cost(self, flip_indices: list[int]) -> int:
-        """Pure read: cost of flipping these bits at current entropy levels."""
-        return sum(2 ** self.bit_history[i] for i in flip_indices)
-        # Note: bit_history[i] + 1 - 1 = bit_history[i], since n = history+1
-        # and cost = 2^(n-1) = 2^(history[i])
-
-    def _cost_vector(self) -> np.ndarray:
-        """The 'heat map': cost to flip each bit right now."""
-        return 2 ** self.bit_history   # elementwise
-
-    def _score(self, player_id: str) -> Rank:
-        p = self.players[player_id]
-        if self.turn <= 3 and p.tokens >= 3:
-            return Rank.S
-        return Rank.A
-
-    def _validate_action(self, action: list[int]):
-        assert len(action) == self.N_FLIPS, (
-            f"Inertia constraint violated: need exactly {self.N_FLIPS} flips."
-        )
-        assert len(set(action)) == self.N_FLIPS, "Duplicate indices in action."
-        assert all(0 <= i < self.N_BITS for i in action), "Bit index out of range."
-
-    @staticmethod
-    def _ab_ba_generator():
-        """Yields player order: A, B, B, A, A, B, B, A ... (AB-BA pattern)"""
-        pattern = ["A", "B", "B", "A"]
-        i = 0
+    def _ab_ba_generator(self):
         while True:
-            yield pattern[i % 4]
-            i += 1
+            for p_id in ["A", "B", "B", "A"]: yield p_id
+
+    def _to_dict(self, sr: StepResult) -> dict:
+        p = self.players[sr.player]
+        status = "GOAL_REACHED" if p.rank in [Rank.S, Rank.A] else sr.status
+        return {"player": sr.player, "cost": sr.cost, "status": status, 
+                "rank": p.rank, "tokens_after": sr.tokens_after, "turn": sr.turn}
