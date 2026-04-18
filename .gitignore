@@ -1,0 +1,10 @@
+# 忽略 PyTorch 權重檔 (讓你的 GitHub 保持輕量)
+*.pth
+
+# 忽略 Python 快取
+__pycache__/
+*.py[cod]
+
+# 忽略系統暫存檔
+.DS_Store
+Thumbs.db
