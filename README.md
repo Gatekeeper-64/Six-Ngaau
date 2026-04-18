@@ -1,3 +1,18 @@
+# Six Ngaau AI Arena - V.24 積分爭霸版
+
+這是一個基於 PPO (Proximal Policy Optimization) 強化學習的博弈實驗。
+
+### 🌟 V.24 改版重點：
+- **64 分積分賽制**：從「驟死賽」進化為「收租馬拉松」，AI 必須學會持續控制盤面。
+- **租金加速燈**：當對手得分效率提升時，全域警報燈會亮起，誘發 AI 進行干擾。
+- **5-Tokens 經濟體系**：解禁資金，讓攻防戰更具侵略性。
+- **四階段課程學習**：從幼兒園到刺客殿堂，自動演化 AI 行為。
+
+### 📂 檔案說明：
+- `environment.py`: 六爻宇宙的物理法則與計分邏輯。
+- `model.py`: 23 維觀測輸入的 PPO 神經網路大腦。
+- `train.py`: 四階段訓練迴圈與課程學習邏輯。
+- 
 ## System Boot Interface (Operational Requirement)
 
 Any implementation of the **Six Ngaau Protocol** must adhere to the following startup sequence to ensure synchronized "Awakening":
